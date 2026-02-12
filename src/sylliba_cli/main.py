@@ -36,6 +36,7 @@ from .output import (
 )
 from .parsers import I18nParser
 from .translator import I18nTranslator, generate_output_filename
+from .extractor import scan_directory, generate_i18n_dict, nest_flat_dict
 
 app = typer.Typer(
     name="sylliba",
@@ -129,6 +130,188 @@ def formats(
         print(json.dumps(SUPPORTED_FORMATS, indent=2))
     else:
         print_formats_table(SUPPORTED_FORMATS)
+
+
+# =============================================================================
+# EXTRACT COMMAND
+# =============================================================================
+
+
+@app.command()
+def extract(
+    directory: Annotated[
+        Path,
+        typer.Argument(help="Directory to scan for translatable strings"),
+    ] = Path("."),
+    output: Annotated[
+        Path | None,
+        typer.Option("--output", "-o", help="Output file path (default: <app>.json)"),
+    ] = None,
+    app_name: Annotated[
+        str,
+        typer.Option("--app", "-a", help="Application name for key namespace"),
+    ] = "app",
+    format_type: Annotated[
+        str,
+        typer.Option("--format", "-f", help="Output format: json, yaml, nested-json"),
+    ] = "nested-json",
+    exclude: Annotated[
+        str | None,
+        typer.Option("--exclude", "-e", help="Comma-separated patterns to exclude"),
+    ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", "-n", help="Show what would be extracted without writing"),
+    ] = False,
+    json_output: Annotated[
+        bool,
+        typer.Option("--json", "-j", help="Output extraction summary as JSON"),
+    ] = False,
+) -> None:
+    """Extract translatable strings from TypeScript/JavaScript source files.
+
+    Scans source files for i18n patterns like t("string"), $t("string"), etc.
+    and generates a translation file with namespaced keys.
+
+    Key format: app.module.string_slug (or app.module.slug_hash for uniqueness)
+
+    Examples:
+
+        sylliba extract src/ --output locales/en.json
+
+        sylliba extract . --app myapp --format nested-json
+
+        sylliba extract src/ --exclude "test,spec,mock" --dry-run
+    """
+    if not directory.exists():
+        print_error(f"Directory not found: {directory}")
+        raise typer.Exit(EXIT_ERROR)
+
+    if not directory.is_dir():
+        print_error(f"Not a directory: {directory}")
+        raise typer.Exit(EXIT_ERROR)
+
+    # Parse exclude patterns
+    exclude_patterns = ["node_modules", "dist", "build", ".git", "__pycache__", ".next", "coverage"]
+    if exclude:
+        exclude_patterns.extend(p.strip() for p in exclude.split(",") if p.strip())
+
+    # Scan directory
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        progress.add_task("Scanning source files...", total=None)
+        result = scan_directory(directory, app_name, exclude_patterns)
+
+    if not result.strings:
+        print_info("No translatable strings found.")
+        console.print(f"Files scanned: {result.files_scanned}")
+        console.print("\nMake sure your code uses i18n patterns like:")
+        console.print("  t('Hello world')")
+        console.print("  i18n.t('Welcome')")
+        console.print("  $t('Click here')")
+        return
+
+    # Generate i18n dictionary
+    i18n_dict = generate_i18n_dict(result, app_name)
+
+    # Convert to nested if requested
+    if format_type == "nested-json":
+        output_dict = nest_flat_dict(i18n_dict)
+    else:
+        output_dict = i18n_dict
+
+    # Determine output path
+    if output is None:
+        lang_code = result.detected_language.lower()[:2]
+        output = Path(f"{app_name}.{lang_code}.json")
+
+    # Output results
+    if json_output:
+        summary = {
+            "directory": str(directory),
+            "files_scanned": result.files_scanned,
+            "strings_found": len(result.strings),
+            "detected_language": result.detected_language,
+            "output_file": str(output) if not dry_run else None,
+            "keys": list(i18n_dict.keys()),
+        }
+        if result.errors:
+            summary["errors"] = result.errors
+        print(json.dumps(summary, indent=2))
+    else:
+        # Print summary table
+        console.print(f"\n[bold]Extraction Summary[/bold]")
+        console.print(f"Directory: {directory}")
+        console.print(f"Files scanned: {result.files_scanned}")
+        console.print(f"Strings found: [green]{len(result.strings)}[/green]")
+        console.print(f"Detected language: [cyan]{result.detected_language}[/cyan]")
+
+        if result.errors:
+            console.print(f"\n[yellow]Warnings ({len(result.errors)}):[/yellow]")
+            for err in result.errors[:5]:
+                console.print(f"  {err}")
+            if len(result.errors) > 5:
+                console.print(f"  ... and {len(result.errors) - 5} more")
+
+        # Show sample of extracted strings
+        console.print(f"\n[bold]Sample strings:[/bold]")
+        table = Table(show_header=True, header_style="bold")
+        table.add_column("Key", style="cyan", no_wrap=True, max_width=40)
+        table.add_column("Value", style="white", max_width=50)
+        table.add_column("File", style="dim", max_width=30)
+
+        sample_strings = result.strings[:10]
+        sample_keys = list(i18n_dict.keys())[:10]
+        for key, extracted in zip(sample_keys, sample_strings):
+            short_key = key if len(key) <= 40 else "..." + key[-37:]
+            short_val = extracted.text if len(extracted.text) <= 50 else extracted.text[:47] + "..."
+            short_file = extracted.file_path if len(extracted.file_path) <= 30 else "..." + extracted.file_path[-27:]
+            table.add_row(short_key, short_val, short_file)
+
+        if len(result.strings) > 10:
+            table.add_row(f"[dim]... and {len(result.strings) - 10} more[/dim]", "", "")
+
+        console.print(table)
+
+    # Write output file
+    if dry_run:
+        if not json_output:
+            console.print(f"\n[bold]Dry run[/bold] - would write to: {output}")
+            console.print("\nPreview of output:")
+            preview_json = json.dumps(output_dict, indent=2, ensure_ascii=False)
+            # Limit preview size
+            lines = preview_json.split("\n")
+            if len(lines) > 30:
+                console.print("\n".join(lines[:30]))
+                console.print(f"[dim]... ({len(lines) - 30} more lines)[/dim]")
+            else:
+                console.print(preview_json)
+    else:
+        # Ensure parent directory exists
+        output.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write based on format
+        if format_type == "yaml":
+            try:
+                import yaml
+                output_content = yaml.dump(output_dict, allow_unicode=True, default_flow_style=False, sort_keys=False)
+            except ImportError:
+                print_error("PyYAML required for YAML output: pip install pyyaml")
+                raise typer.Exit(EXIT_ERROR)
+        else:
+            output_content = json.dumps(output_dict, indent=2, ensure_ascii=False)
+
+        output.write_text(output_content, encoding="utf-8")
+
+        if not json_output:
+            print_success(f"\nExtracted {len(result.strings)} strings to {output}")
+            console.print(f"\nNext steps:")
+            console.print(f"  1. Review and edit: {output}")
+            console.print(f"  2. Translate: sylliba translate {output} --to French,Spanish,German")
 
 
 # =============================================================================

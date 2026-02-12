@@ -8,9 +8,12 @@ A command-line tool for translating i18n (internationalization) files to multipl
 
 ## Features
 
+- **String extraction**: Scan TypeScript/JavaScript source files and generate i18n files automatically
 - **Multi-format support**: JSON, YAML, PO/POT, Properties, JavaScript/TypeScript, Python, Rust
 - **Batch translation**: Translate to multiple languages in one command
 - **Placeholder preservation**: Automatically protects `{variables}`, `%s` printf-style, HTML tags, and ICU syntax
+- **Auto language detection**: Detects the source language from your strings
+- **Namespaced keys**: Generates keys like `app.module.string_name` from file paths
 - **Dry-run mode**: Preview what would be translated without making API calls
 - **JSON output**: Machine-readable output for CI/CD integration
 - **Secure credential storage**: API keys stored securely in `~/.sylliba/`
@@ -31,23 +34,79 @@ uv tool install sylliba-cli
 ## Quick Start
 
 ```bash
+# Extract strings from your TypeScript/React project
+sylliba extract src/ --app myapp --output locales/en.json
+
 # Set your API key (get one from the Sylliba web interface)
 sylliba login --api-key sk_live_your_key_here
 
-# Translate a file to French
-sylliba translate en.json --to French
-
 # Translate to multiple languages
-sylliba translate en.json --to "French,Spanish,German,Japanese"
+sylliba translate locales/en.json --to "French,Spanish,German,Japanese"
 
 # Preview a file's contents
-sylliba preview en.json
+sylliba preview locales/en.json
 
 # List supported formats
 sylliba formats
 ```
 
 ## Commands
+
+### `sylliba extract`
+
+Extract translatable strings from TypeScript/JavaScript source files and generate an i18n file.
+
+```bash
+sylliba extract [directory] [options]
+```
+
+**Arguments:**
+- `[directory]`: Directory to scan (default: current directory)
+
+**Options:**
+- `--output, -o`: Output file path (default: `<app>.<lang>.json`)
+- `--app, -a`: Application name for key namespace (default: `app`)
+- `--format, -f`: Output format: `json`, `yaml`, `nested-json` (default: `nested-json`)
+- `--exclude, -e`: Comma-separated patterns to exclude
+- `--dry-run, -n`: Show what would be extracted without writing
+- `--json, -j`: Output extraction summary as JSON
+
+**Supported patterns:**
+
+| Framework | Patterns |
+|-----------|----------|
+| React i18next | `t("string")`, `<Trans>text</Trans>` |
+| Vue i18n | `$t("string")`, `{{ $t("string") }}` |
+| react-intl | `formatMessage({ defaultMessage: "string" })` |
+| Angular | `$localize\`string\`` |
+| Generic | `__("string")`, `i18n.t("string")` |
+
+**Key generation:**
+
+Keys are namespaced based on file path: `app.module.string_slug`
+
+- `src/components/Button.tsx` with `t("Submit")` → `app.button.submit`
+- Long strings are truncated with a hash for uniqueness
+
+**Examples:**
+
+```bash
+# Extract from React/Next.js project
+sylliba extract src/ --app myapp --output locales/en.json
+
+# Extract from Vue project
+sylliba extract . --app frontend --format nested-json
+
+# Preview extraction without writing
+sylliba extract src/ --dry-run
+
+# Exclude test files
+sylliba extract . --exclude "test,spec,__tests__,mock"
+
+# Full workflow: extract, then translate
+sylliba extract src/ --output locales/en.json
+sylliba translate locales/en.json --to "French,Spanish,German"
+```
 
 ### `sylliba translate`
 
